@@ -1,6 +1,8 @@
-# Changes
+# Changelog
 
-## Appearance and review update
+## v1.0.0 — 2026-09-12
+
+### Appearance and review update
 
 - Eleven more distinct appearances, including dark red, blue, teal, and violet.
 - Independent resizable Review & Copy window with search, sortable headings, and full file details.
@@ -11,7 +13,7 @@
 - Regression coverage for selection, review independence, themes, column fitting, and layout reset.
 
 
-## Workspace and safety update
+### Workspace and safety update
 
 - Lab Slate appearance and numbered workflow sections.
 - Draggable dividers, remembered window/column sizes, and reset layout.
