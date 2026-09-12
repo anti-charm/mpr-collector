@@ -2,6 +2,8 @@
 
 A lightweight Windows desktop tool for collecting BioLogic `.mpr` files from experiment branches into one flat destination folder. Source files are copied, never moved, renamed, or deleted. No accounts, telemetry, network requests, or third-party Python packages.
 
+![MPR Collector interface](docs/mpr-collector.png)
+
 ## Start here
 
 1. Download and **extract the whole ZIP** into a writable folder. Keep the four Python files and launcher together.
