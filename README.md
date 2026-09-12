@@ -4,11 +4,11 @@ A lightweight Windows desktop tool for collecting BioLogic `.mpr` files from exp
 
 ## Start here
 
-1. Download and **extract the whole ZIP** into a writable folder. Keep the three Python files and launcher together.
+1. Download and **extract the whole ZIP** into a writable folder. Keep the four Python files and launcher together.
 2. If needed, install **Python 3.10 or newer with Tkinter** from [Python for Windows](https://www.python.org/downloads/windows/). Use the normal Windows installer with Tcl/Tk enabled. You do not need to learn Python or install pip packages.
 3. Double-click **Run_MPR_Collector.bat**. If Python is missing, it explains what to install.
 4. Choose a **Mother folder** and a **Destination**. A destination outside your source tree is easiest to maintain.
-5. Click a folder to include its entire subtree. Double-click to exclude a branch. You can include a deeper branch again. The mother folder itself can also be selected.
+5. Click a folder checkbox to include or exclude its subtree. Clicking the folder name only focuses it; double-clicking the name expands or collapses it. You can include a deeper branch again. The mother folder itself can also be selected.
 6. Click **Scan selected folders**, review **Source filename**, **Copied as**, and **Planned action**, then **Copy MPR files** and confirm the summary.
 
 Only `.mpr` extensions are collected, regardless of capitalization. Contents are copied as bytes; the tool does not interpret or validate BioLogic data.
@@ -19,11 +19,19 @@ Only `.mpr` extensions are collected, regardless of capitalization. Contents are
 - Drag the divider above Review & Copy to change panel heights.
 - Resize the window and drag table-column boundaries. Window dimensions, panel proportions, column widths, maximized state, and appearance are remembered.
 - **Reset layout** restores the default arrangement.
-- Seven color schemes include the new neutral **Lab Slate** default. Existing saved themes still load.
+- Eleven distinct color schemes include **Dark Red**, **Dark Blue**, **Dark Teal**, and **Dark Violet**, plus stronger light themes. **Lab Slate** remains the default. Existing saved themes still load.
 - Long paths and filenames have horizontal scrollbars; lists also scroll vertically.
 - **Include**, **Exclude**, and **Space** act on the focused folder. Expand/Collapse buttons and Left/Right keys control expansion.
 
 Scans and copies run in the background with an activity indicator. Selection and action controls are temporarily disabled to keep each operation consistent. Wait for completion before closing. Very large result tables can take a moment to display.
+
+## Review in detail
+
+- **Open review window** opens a separate resizable window that can be maximized or left open while using the main app. Closing it leaves the main view and any active copy operation intact.
+- Search and click column headings to sort in the separate window. Its filtering, sorting, and column widths do not change the main table or the scan selection. **Copy all scanned files** always uses the entire scan, even when the window is filtered, and asks for confirmation.
+- Double-click a column divider to fit the longest displayed value. Width is limited to 520 pixels or half the table width, whichever is smaller, so a long path cannot take over the table. Drag the divider manually for a different width.
+- Double-click a row or press Enter for full source and destination paths. File details show a snapshot taken when opened.
+- **Name adjusted** means the destination name was made unique (for example, a continuation suffix or duplicate filename). It is not an error. The **Name change** column explains this explicitly; alternating row shades only aid reading.
 
 ## Presets
 
@@ -79,4 +87,4 @@ From the project directory:
 python -m unittest discover -s tests -v
 ```
 
-Tests use temporary synthetic files and cover recursive selection, exclusions, continuations, global filename collisions, copy failure safety, privacy settings, saved layout, keyboard selection, and the UI scan/copy workflow. UI tests require Tkinter and a desktop session. The suite was verified locally on Windows with Python 3.12. No pip dependencies are needed.
+Tests use temporary synthetic files and cover recursive selection, exclusions, continuations, global filename collisions, copy failure safety, privacy settings, saved layout, keyboard selection, the UI scan/copy workflow, checkbox interactions, independent review windows, capped column fitting, and dark appearance. UI tests require Tkinter and a desktop session. The suite was verified locally on Windows with Python 3.12. No pip dependencies are needed.

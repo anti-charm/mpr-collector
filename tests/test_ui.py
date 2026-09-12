@@ -90,9 +90,10 @@ class InterfaceTests(unittest.TestCase):
         self.app.tree.event_generate('<Button-1>', x=x + 65, y=y + height // 2)
         self.app.update()
         self.assertEqual(self.app.focus_get(), self.app.tree)
+        self.assertFalse(any(self.app.selection_rules.values()))
         self.app.tree.event_generate('<KeyPress-space>')
         self.app.update()
-        self.assertFalse(any(self.app.selection_rules.values()))
+        self.assertTrue(any(self.app.selection_rules.values()))
 
     def test_scan_then_copy_keeps_source_and_creates_destination(self):
         root = self.cfg / 'experiment'

@@ -78,3 +78,30 @@ COLOR_SCHEMES['Lab Slate'] = {
     'gradient_end': '#e5edf6', 'gradient_text': '#203047', 'gradient_subtext': '#586a80',
 }
 DEFAULT_COLOR_SCHEME = 'Lab Slate'
+
+# Stronger light palettes keep their saved names for compatibility.
+for _name, _updates in {
+    'Warm Clay': {'bg': '#efd0bd', 'card': '#fff5ee', 'accent': '#a34420', 'accent_pressed': '#773019', 'soft': '#f5dfce'},
+    'Sage & Linen': {'bg': '#cadac7', 'card': '#f4fbef', 'accent': '#356441', 'accent_pressed': '#254b2e', 'soft': '#dcebd4'},
+    'Slate & Sky': {'bg': '#c9dced', 'card': '#f1f8ff', 'accent': '#1e609b', 'accent_pressed': '#154673', 'soft': '#d8e9f8'},
+    'Sand & Teal': {'bg': '#c7dfd9', 'card': '#f5fffa', 'accent': '#146d65', 'accent_pressed': '#0d504a', 'soft': '#d8eee6'},
+    'Rosewood & Cream': {'bg': '#e7c5d0', 'card': '#fff2f6', 'accent': '#963a61', 'accent_pressed': '#702746', 'soft': '#f2d9e3'},
+    'Graphite & Amber': {'bg': '#e4d4b0', 'card': '#fff9e9', 'accent': '#8b5714', 'accent_pressed': '#65400c', 'soft': '#f4e6c3'},
+}.items():
+    COLOR_SCHEMES[_name].update(_updates)
+
+for _name, _bg, _card, _soft, _select, _accent, _hover, _pressed in [
+    ('Dark Red', '#160e14', '#24171f', '#38222e', '#5b2b40', '#ad2e50', '#c13b60', '#84203c'),
+    ('Dark Blue', '#091321', '#111f33', '#1c304b', '#254b74', '#245eac', '#3175c9', '#1b4885'),
+    ('Dark Teal', '#091b1a', '#112b29', '#1a3a37', '#24534e', '#087970', '#099387', '#075b55'),
+    ('Dark Violet', '#160f24', '#241a36', '#36254c', '#513971', '#7445af', '#895bc4', '#573184'),
+]:
+    COLOR_SCHEMES[_name] = {
+        'bg': _bg, 'card': _card, 'entry_bg': _bg, 'border': _soft,
+        'text': '#f3f5fa', 'muted': '#b9c5d6', 'accent': _accent,
+        'accent_hover': _hover, 'accent_pressed': _pressed,
+        'soft': _soft, 'soft_hover': _select, 'select_bg': _select,
+        'table_alt': _card, 'rename_bg': _soft, 'shadow': _bg,
+        'gradient_start': _bg, 'gradient_middle': _card, 'gradient_end': _soft,
+        'gradient_text': '#f3f5fa', 'gradient_subtext': '#b9c5d6',
+    }
