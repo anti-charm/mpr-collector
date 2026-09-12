@@ -1,0 +1,30 @@
+# User-specific data created by MPR Collector
+MPR_Collector_Data/*
+!MPR_Collector_Data/README.txt
+
+# Experimental data
+*.[mM][pP][rR]
+*.mpt
+*.mps
+
+# Credentials and private local configuration
+.env
+.env.*
+*.pem
+*.key
+
+# Python and packaging output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.spec
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
