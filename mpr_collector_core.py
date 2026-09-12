@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -85,10 +86,13 @@ def collect_mpr_files_by_rules(rules: Mapping[Path, bool]) -> list[Path]:
         (_norm_path(p) for p, selected in rules.items() if selected),
         key=lambda p: (len(p.parts), str(p).lower()),
     )
+    def scan_error(error):
+        raise error
+
     for root in true_roots:
         if not root.is_dir():
-            continue
-        for current, dirs, files in os.walk(root):
+            raise FileNotFoundError(f'Selected folder is missing or inaccessible: {root}')
+        for current, dirs, files in os.walk(root, onerror=scan_error):
             current_path = Path(current).resolve()
             if not effective_selection(current_path, rules):
                 dirs[:] = []
@@ -211,7 +215,7 @@ def plan_flat_copy_names(files: Iterable[Path | str]) -> dict[Path, str]:
     cont + cont2 layout), while continuation/collision files get the shortest
     unique parent-folder suffix, e.g. ``name__cont.mpr``.
     """
-    resolved = [Path(raw).resolve() for raw in files]
+    resolved = sorted({Path(raw).resolve() for raw in files}, key=lambda p: str(p).casefold())
     by_name: dict[str, list[Path]] = {}
     for path in resolved:
         by_name.setdefault(path.name.casefold(), []).append(path)
@@ -219,26 +223,18 @@ def plan_flat_copy_names(files: Iterable[Path | str]) -> dict[Path, str]:
     plan: dict[Path, str] = {}
     used: set[str] = set()
 
+    # Reserve real filenames first: a generated suffix must never steal one.
+    reserved = {p.name.casefold() for p in resolved}
     for group in by_name.values():
         group = sorted(group, key=lambda p: (len(p.parts), str(p).casefold()))
-        if len(group) == 1:
-            path = group[0]
-            parent_name = path.parent.name
-            if re.fullmatch(r"cont(?:\s*\d+)?", parent_name, flags=re.I):
-                candidate = f"{path.stem}__{_safe_suffix_component(parent_name)}{path.suffix}"
-            else:
-                candidate = path.name
-            plan[path] = candidate
-            used.add(candidate.casefold())
-            continue
-
         depths = [len(p.parts) for p in group]
         minimum = min(depths)
         minimum_paths = [p for p in group if len(p.parts) == minimum]
         plain_path = minimum_paths[0] if len(minimum_paths) == 1 else None
 
         for path in group:
-            if path == plain_path:
+            continuation = bool(re.fullmatch(r"cont(?:\s*\d+)?", path.parent.name, flags=re.I))
+            if not continuation and (len(group) == 1 or path == plain_path):
                 candidate = path.name
             else:
                 suffix = _shortest_unique_folder_suffix(path, group)
@@ -246,7 +242,9 @@ def plan_flat_copy_names(files: Iterable[Path | str]) -> dict[Path, str]:
 
             base_candidate = candidate
             serial = 2
-            while candidate.casefold() in used:
+            while candidate.casefold() in used or (
+                candidate.casefold() in reserved and candidate.casefold() != path.name.casefold()
+            ):
                 candidate = f"{Path(base_candidate).stem}__{serial}{Path(base_candidate).suffix}"
                 serial += 1
             plan[path] = candidate
@@ -263,10 +261,8 @@ def copy_files_flat(
     name_plan: Mapping[Path, str] | None = None,
 ) -> CopyResult:
     """Copy files into one flat destination; source files are never moved or deleted."""
-    destination = Path(destination).expanduser()
-    destination.mkdir(parents=True, exist_ok=True)
-
-    sources = [Path(raw).resolve() for raw in files]
+    destination = Path(destination).expanduser().resolve()
+    sources = list(dict.fromkeys(Path(raw).resolve() for raw in files))
     if name_plan is None:
         name_plan = plan_flat_copy_names(sources)
 
@@ -274,16 +270,61 @@ def copy_files_flat(
     skipped = 0
     failures: list[str] = []
 
+    # Validate the complete plan before writing anything.
+    names = [name_plan.get(src, src.name) for src in sources]
+    invalid = any(
+        not isinstance(name, str) or not name or name in ('.', '..')
+        or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)
+        or name.endswith((' ', '.')) or Path(name).suffix.lower() != '.mpr'
+        for name in names
+    )
+    if invalid or len({n.casefold() for n in names}) != len(names):
+        return CopyResult(0, 0, len(sources), ('Invalid or duplicate destination filenames; nothing copied.',))
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return CopyResult(0, 0, len(sources), (f'Cannot create destination: {exc}',))
+
+    source_set = set(sources)
+
     for src in sources:
         dst = destination / name_plan.get(src, src.name)
+        temporary = None
         try:
+            if dst.is_symlink() or dst.resolve() in source_set:
+                raise ValueError('Destination would overwrite a source file or symbolic link')
             if dst.exists() and not overwrite:
                 skipped += 1
                 continue
-            shutil.copy2(src, dst)
+            # Stage the full file beside its destination before publishing it.
+            # An interrupted copy leaves an existing destination untouched.
+            fd, temporary_name = tempfile.mkstemp(prefix='.mpr-copy-', suffix='.tmp', dir=destination)
+            os.close(fd)
+            temporary = Path(temporary_name)
+            shutil.copy2(src, temporary)
+            if overwrite:
+                os.replace(temporary, dst)
+            else:
+                # Atomic, exclusive publication: never overwrite a file that
+                # appeared since the existence check. Windows rename refuses
+                # existing targets; POSIX link provides the same guarantee.
+                try:
+                    if os.name == 'nt':
+                        os.rename(temporary, dst)
+                    else:
+                        os.link(temporary, dst)
+                except FileExistsError:
+                    skipped += 1
+                    continue
             copied += 1
         except Exception as exc:
             failures.append(f"{src}: {exc}")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     return CopyResult(copied=copied, skipped_existing=skipped, failed=len(failures), failures=tuple(failures))
 
@@ -301,19 +342,24 @@ def save_app_settings(
     root_folder: Path | str,
     destination_folder: Path | str,
     color_scheme: str,
+    *,
+    remember_paths: bool = True,
+    layout: dict | None = None,
 ) -> None:
     """Persist folder paths and appearance settings to one local JSON file."""
     path = Path(settings_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
-        "root_folder": str(root_folder),
-        "destination_folder": str(destination_folder),
+        "root_folder": str(root_folder) if remember_paths else "",
+        "destination_folder": str(destination_folder) if remember_paths else "",
         "color_scheme": str(color_scheme),
+        "remember_paths": remember_paths,
+        "layout": layout or {},
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_json_atomic(path, data)
 
 
-def load_app_settings(settings_path: Path | str) -> dict[str, str]:
+def load_app_settings(settings_path: Path | str) -> dict:
     """Load app settings, returning empty strings when unavailable/corrupt."""
     path = Path(settings_path).expanduser()
     try:
@@ -324,6 +370,20 @@ def load_app_settings(settings_path: Path | str) -> dict[str, str]:
             "root_folder": str(data.get("root_folder", "")),
             "destination_folder": str(data.get("destination_folder", "")),
             "color_scheme": str(data.get("color_scheme", "")),
+            "remember_paths": data.get("remember_paths", True) is not False,
+            "layout": data.get("layout", {}) if isinstance(data.get("layout"), dict) else {},
         }
     except Exception:
         return {"root_folder": "", "destination_folder": "", "color_scheme": ""}
+
+
+def write_json_atomic(path: Path, data: object) -> None:
+    """Preserve the previous settings if writing the new version fails."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.settings-', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)

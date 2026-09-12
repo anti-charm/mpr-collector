@@ -1,8 +1,11 @@
 MPR Collector local data
 ========================
 
-The program automatically creates these files here when needed:
-- settings.json  : remembered mother folder, destination folder, and color scheme
-- presets.json   : saved folder-selection presets
+Created on this computer when needed:
+- settings.json: appearance, layout, and optionally remembered folder paths
+- presets.json: saved folder selections, including folder paths
 
-Keep this folder beside the collector if you move the program and want to retain those settings.
+These files are plain text. Do not include them when sharing the program.
+Unchecking Remember folder paths clears those paths from settings; it does not
+remove paths deliberately saved in presets. A sync service such as OneDrive
+may sync this folder independently of MPR Collector.

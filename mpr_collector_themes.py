@@ -66,3 +66,15 @@ COLOR_SCHEMES: dict[str, dict[str, str]] = {
 }
 
 DEFAULT_COLOR_SCHEME = "Warm Clay"
+
+# Neutral default for new installations; saved themes remain unchanged.
+COLOR_SCHEMES['Lab Slate'] = {
+    'bg': '#eef2f6', 'card': '#ffffff', 'border': '#d8e0e9',
+    'text': '#203047', 'muted': '#586a80', 'accent': '#2663a6',
+    'accent_hover': '#3275bc', 'accent_pressed': '#1b4e87',
+    'soft': '#f1f5f9', 'soft_hover': '#e4ebf3', 'select_bg': '#daeafa',
+    'table_alt': '#f6f8fb', 'rename_bg': '#eaf3fc', 'entry_bg': '#ffffff',
+    'shadow': '#e5eaf0', 'gradient_start': '#ffffff', 'gradient_middle': '#f3f7fb',
+    'gradient_end': '#e5edf6', 'gradient_text': '#203047', 'gradient_subtext': '#586a80',
+}
+DEFAULT_COLOR_SCHEME = 'Lab Slate'

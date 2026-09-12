@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import sys
+import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,7 @@ from mpr_collector_core import (
     save_app_settings,
     selection_state,
     set_selection_rule,
+    write_json_atomic,
 )
 
 from mpr_collector_themes import COLOR_SCHEMES, DEFAULT_COLOR_SCHEME
@@ -43,12 +46,18 @@ class MPRCollectorApp(tk.Tk):
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1240x820")
-        self.minsize(1040, 700)
+        self.minsize(900, 680)
 
         cfg = app_config_dir()
         self.presets_path = cfg / "presets.json"
         self.settings_path = cfg / "settings.json"
         saved_settings = load_app_settings(self.settings_path)
+        self.remember_paths = tk.BooleanVar(value=saved_settings.get('remember_paths', True))
+        self._saved_layout = saved_settings.get('layout', {})
+        self._loaded_root = None
+        self._busy = False
+        self._job_queue = queue.Queue()
+        self._poll_id = None
         saved_scheme = saved_settings.get("color_scheme", "")
         if saved_scheme not in COLOR_SCHEMES:
             saved_scheme = DEFAULT_COLOR_SCHEME
@@ -80,6 +89,7 @@ class MPRCollectorApp(tk.Tk):
         self._build_ui()
         self._refresh_presets()
         self._restore_last_folders()
+        self.after_idle(self._restore_layout)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------- visual design ----------
@@ -103,7 +113,7 @@ class MPRCollectorApp(tk.Tk):
             "Accent.TButton",
             background=p["accent"], foreground="#ffffff", bordercolor=p["accent_pressed"],
             lightcolor=p["accent_hover"], darkcolor=p["accent_pressed"],
-            padding=(13, 8), font=("Segoe UI Semibold", 9), relief="raised", borderwidth=1,
+            padding=(13, 7), font=("Segoe UI Semibold", 9), relief="flat", borderwidth=1,
         )
         style.map(
             "Accent.TButton",
@@ -114,13 +124,13 @@ class MPRCollectorApp(tk.Tk):
             "Soft.TButton",
             background=p["soft"], foreground=p["text"], bordercolor=p["border"],
             lightcolor=p["entry_bg"], darkcolor=p["border"],
-            padding=(11, 7), font=("Segoe UI", 9), relief="raised", borderwidth=1,
+            padding=(9, 5), font=("Segoe UI", 9), relief="flat", borderwidth=1,
         )
         style.map("Soft.TButton", background=[("active", p["soft_hover"]), ("pressed", p["select_bg"])])
 
         style.configure(
             "Folder.Treeview", background=p["entry_bg"], fieldbackground=p["entry_bg"],
-            foreground=p["text"], rowheight=34, font=("Segoe UI", 10),
+            foreground=p["text"], rowheight=29, font=("Segoe UI", 10),
             bordercolor=p["border"], borderwidth=1,
         )
         style.map("Folder.Treeview", background=[("selected", p["select_bg"])], foreground=[("selected", p["text"])])
@@ -137,6 +147,8 @@ class MPRCollectorApp(tk.Tk):
         style.map("Warm.TCheckbutton", background=[("active", p["card"])])
         style.configure("TEntry", fieldbackground=p["entry_bg"], bordercolor=p["border"], padding=6)
         style.configure("TCombobox", fieldbackground=p["entry_bg"], bordercolor=p["border"], padding=5)
+        style.map('TCombobox', fieldbackground=[('readonly', p['entry_bg'])], foreground=[('readonly', p['text'])])
+        style.configure('Horizontal.TProgressbar', background=p['accent'], troughcolor=p['bg'], borderwidth=0)
 
     def _card(self, parent: tk.Misc, *, padx: int = 1, pady: int = 1) -> tuple[tk.Frame, ttk.Frame]:
         """Return a subtle bordered/shadowed card and its inner ttk frame."""
@@ -150,156 +162,236 @@ class MPRCollectorApp(tk.Tk):
         return shadow, inner
 
     def _build_ui(self) -> None:
-        self.banner = tk.Canvas(self, height=78, bg=self.palette["bg"], highlightthickness=0)
-        self.banner.pack(fill="x")
-        self.banner.bind("<Configure>", self._draw_gradient_banner)
+        self.banner = tk.Canvas(self, height=68, bg=self.palette['card'], highlightthickness=0)
+        self.banner.pack(fill='x')
+        self.banner.bind('<Configure>', self._draw_gradient_banner)
+        main = ttk.Frame(self, style='App.TFrame', padding=(16, 10, 16, 10))
+        main.pack(fill='both', expand=True)
 
-        main = ttk.Frame(self, style="App.TFrame", padding=(12, 8, 12, 8))
-        main.pack(fill="both", expand=True)
-
-        # Paths card
-        path_card, paths = self._card(main)
-        path_card.pack(fill="x", pady=(0, 10))
+        card, paths = self._card(main)
+        card.pack(fill='x', pady=(0, 8))
         paths.columnconfigure(1, weight=1)
-        ttk.Label(paths, text="Folders", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        appearance = ttk.Frame(paths, style="Card.TFrame")
-        appearance.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 6))
-        ttk.Label(appearance, text="Color scheme", style="Muted.TLabel").pack(side="left", padx=(0, 7))
-        self.theme_combo = ttk.Combobox(
-            appearance, textvariable=self.color_scheme, values=list(COLOR_SCHEMES.keys()),
-            state="readonly", width=19,
-        )
-        self.theme_combo.pack(side="left")
-        self.theme_combo.bind("<<ComboboxSelected>>", self._on_color_scheme_changed)
-
-        ttk.Label(paths, text="Mother folder", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(paths, text='01  /  LOCATIONS', style='Section.TLabel').grid(row=0, column=0, sticky='w')
+        appearance = ttk.Frame(paths, style='Card.TFrame')
+        appearance.grid(row=0, column=1, columnspan=2, sticky='e')
+        ttk.Label(appearance, text='Appearance', style='Muted.TLabel').pack(side='left', padx=8)
+        self.theme_combo = ttk.Combobox(appearance, textvariable=self.color_scheme,
+                                      values=list(COLOR_SCHEMES), state='readonly', width=18)
+        self.theme_combo.pack(side='left')
+        self.theme_combo.bind('<<ComboboxSelected>>', self._on_color_scheme_changed)
+        ttk.Button(appearance, text='Reset layout', command=self.reset_layout,
+                   style='Soft.TButton').pack(side='left', padx=(8, 0))
+        ttk.Label(paths, text='Mother folder', style='Card.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 12), pady=(8, 4))
         self.root_entry = ttk.Entry(paths, textvariable=self.root_folder)
-        self.root_entry.grid(row=1, column=1, sticky="ew", pady=5)
-        self.root_entry.bind("<Return>", lambda _e: self._apply_root_entry())
-        self.root_entry.bind("<FocusOut>", lambda _e: self._save_last_folders())
-        ttk.Button(paths, text="Browse…", command=self.choose_root, style="Soft.TButton").grid(row=1, column=2, padx=(10, 0), pady=5)
-
-        ttk.Label(paths, text="Copy MPR files to", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=5)
+        self.root_entry.grid(row=1, column=1, sticky='ew', pady=(8, 4))
+        self.root_entry.bind('<Return>', lambda e: self._apply_root_entry())
+        self.root_entry.bind('<FocusOut>', lambda e: self._apply_root_entry())
+        ttk.Button(paths, text='Browse…', command=self.choose_root, style='Soft.TButton').grid(row=1, column=2, padx=(8, 0), pady=(8, 4))
+        ttk.Label(paths, text='Destination', style='Card.TLabel').grid(row=2, column=0, sticky='w', padx=(0, 12))
         self.dest_entry = ttk.Entry(paths, textvariable=self.destination_folder)
-        self.dest_entry.grid(row=2, column=1, sticky="ew", pady=5)
-        self.dest_entry.bind("<Return>", lambda _e: self._save_last_folders())
-        self.dest_entry.bind("<FocusOut>", lambda _e: self._save_last_folders())
-        ttk.Button(paths, text="Browse…", command=self.choose_destination, style="Soft.TButton").grid(row=2, column=2, padx=(10, 0), pady=5)
-        ttk.Label(paths, text="These two paths are remembered automatically for the next time you open the program.", style="Muted.TLabel").grid(row=3, column=1, sticky="w", pady=(2, 0))
+        self.dest_entry.grid(row=2, column=1, sticky='ew')
+        self.dest_entry.bind('<Return>', lambda e: self._destination_changed())
+        self.dest_entry.bind('<FocusOut>', lambda e: self._destination_changed())
+        ttk.Button(paths, text='Browse…', command=self.choose_destination, style='Soft.TButton').grid(row=2, column=2, padx=(8, 0))
+        ttk.Checkbutton(paths, text='Remember folder paths on this computer', variable=self.remember_paths,
+                        command=self._save_last_folders, style='Warm.TCheckbutton').grid(row=3, column=1, sticky='w', pady=(7, 0))
 
-        middle = ttk.Panedwindow(main, orient="horizontal", height=335)
-        middle.pack(fill="x", expand=False, pady=(0, 10))
+        self.workspace_panes = tk.PanedWindow(main, orient='vertical', bd=0, sashwidth=9,
+                                              bg=self.palette['bg'], opaqueresize=True)
+        self.workspace_panes.pack(fill='both', expand=True)
+        self.folder_panes = tk.PanedWindow(self.workspace_panes, orient='horizontal', bd=0,
+                                          sashwidth=9, bg=self.palette['bg'], opaqueresize=True)
+        self.workspace_panes.add(self.folder_panes, minsize=200, stretch='always')
+        left_card, left = self._card(self.folder_panes)
+        right_card, right = self._card(self.folder_panes)
+        self.folder_panes.add(left_card, minsize=390, stretch='always')
+        self.folder_panes.add(right_card, minsize=240, stretch='always')
+        ttk.Label(left, text='02  /  SELECT BRANCHES', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(left, text='Click to include · Double-click to exclude · Space to toggle', style='Muted.TLabel').pack(anchor='w', pady=(4, 6))
+        toolbar = ttk.Frame(left, style='Card.TFrame')
+        toolbar.pack(fill='x', pady=(0, 6))
+        for label, command in [('Expand', self.expand_focused), ('Collapse', self.collapse_focused),
+                               ('Include', lambda: self.set_focused_selection(True)),
+                               ('Exclude', lambda: self.set_focused_selection(False)), ('Clear', self.clear_selection)]:
+            ttk.Button(toolbar, text=label, command=command, style='Soft.TButton').pack(side='left', padx=(0, 4))
+        tree_frame = ttk.Frame(left, style='Card.TFrame')
+        tree_frame.pack(fill='both', expand=True)
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(tree_frame, show='tree', selectmode='browse', style='Folder.Treeview', height=4)
+        self.tree.column('#0', width=600, minwidth=200, stretch=True)
+        self._scrollable(self.tree, tree_frame)
+        self.tree.bind('<<TreeviewOpen>>', self._on_tree_open)
+        self.tree.bind('<Button-1>', self._on_tree_click)
+        self.tree.bind('<Double-1>', self._on_tree_double_click)
+        self.tree.bind('<Right>', lambda e: (self.expand_focused(), 'break')[1])
+        self.tree.bind('<Left>', lambda e: (self.collapse_focused(), 'break')[1])
+        self.tree.bind('<space>', self._toggle_focused)
 
-        # Browser card
-        left_shadow, left = self._card(middle)
-        right_shadow, right = self._card(middle)
-        middle.add(left_shadow, weight=3)
-        middle.add(right_shadow, weight=2)
-
-        ttk.Label(left, text="Choose experiment folders", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(
-            left,
-            text="Single-click selects a folder and everything below it. Double-click deselects that branch. Expand and exclude only what you do not want.",
-            style="Muted.TLabel",
-            wraplength=670,
-            justify="left",
-        ).pack(fill="x", pady=(2, 8))
-
-        tools = ttk.Frame(left, style="Card.TFrame")
-        tools.pack(fill="x", pady=(0, 6))
-        ttk.Button(tools, text="▾  Expand focused", command=self.expand_focused, style="Soft.TButton").pack(side="left")
-        ttk.Button(tools, text="▴  Collapse focused", command=self.collapse_focused, style="Soft.TButton").pack(side="left", padx=6)
-        ttk.Button(tools, text="Clear selection", command=self.clear_selection, style="Soft.TButton").pack(side="left")
-
-        tree_frame = tk.Frame(left, bg=self.palette["border"], bd=0)
-        self._border_frames.append(tree_frame)
-        tree_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse", style="Folder.Treeview")
-        yscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=yscroll.set)
-        self.tree.pack(side="left", fill="both", expand=True, padx=1, pady=1)
-        yscroll.pack(side="right", fill="y", padx=(0, 1), pady=1)
-        self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
-        self.tree.bind("<Button-1>", self._on_tree_click)
-        self.tree.bind("<Double-1>", self._on_tree_double_click)
-        self.tree.bind("<Right>", lambda _e: (self.expand_focused(), "break")[1])
-        self.tree.bind("<Left>", lambda _e: (self.collapse_focused(), "break")[1])
-
-        # Selection summary card content
-        ttk.Label(right, text="Selection", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(right, textvariable=self.selection_summary, style="Muted.TLabel").pack(anchor="w", pady=(2, 7))
-        self.rule_list = tk.Listbox(
-            right,
-            selectmode="browse",
-            exportselection=False,
-            font=("Segoe UI", 9),
-            bg=self.palette["entry_bg"],
-            fg=self.palette["text"],
-            selectbackground=self.palette["select_bg"],
-            selectforeground=self.palette["text"],
-            relief="flat",
-            bd=0,
-            highlightthickness=1,
-            highlightbackground=self.palette["border"],
-            activestyle="none",
-            height=6,
-        )
-        self.rule_list.pack(fill="both", expand=True, pady=(0, 8))
-
-        preset = ttk.Frame(right, style="Card.TFrame")
-        preset.pack(fill="x")
-        ttk.Label(preset, text="Saved selection", style="Card.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
-        self.preset_combo = ttk.Combobox(preset, textvariable=self.preset_name, state="readonly")
-        self.preset_combo.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        ttk.Label(right, text='SELECTION & PRESETS', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(right, textvariable=self.selection_summary, style='Muted.TLabel').pack(anchor='w', pady=(4, 6))
+        rule_frame = ttk.Frame(right, style='Card.TFrame')
+        rule_frame.pack(fill='both', expand=True)
+        rule_frame.rowconfigure(0, weight=1)
+        rule_frame.columnconfigure(0, weight=1)
+        self.rule_list = tk.Listbox(rule_frame, height=3, font=('Segoe UI', 10),
+                                   bg=self.palette['entry_bg'], fg=self.palette['text'],
+                                   relief='flat', highlightthickness=0, exportselection=False,
+                                   selectbackground=self.palette['select_bg'], selectforeground=self.palette['text'])
+        self._scrollable(self.rule_list, rule_frame)
+        preset = ttk.Frame(right, style='Card.TFrame')
+        preset.pack(fill='x', pady=(6, 0))
         preset.columnconfigure(0, weight=1)
-        preset.columnconfigure(1, weight=1)
-        preset.columnconfigure(2, weight=1)
-        ttk.Button(preset, text="Load", command=self.load_preset, style="Soft.TButton").grid(row=2, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(preset, text="Save current", command=self.save_preset, style="Soft.TButton").grid(row=2, column=1, sticky="ew", padx=4)
-        ttk.Button(preset, text="Delete", command=self.delete_preset, style="Soft.TButton").grid(row=2, column=2, sticky="ew", padx=(4, 0))
+        self.preset_combo = ttk.Combobox(preset, textvariable=self.preset_name, state='readonly', width=12)
+        self.preset_combo.grid(row=0, column=0, sticky='ew', padx=(0, 5))
+        ttk.Button(preset, text='Load', command=self.load_preset, style='Soft.TButton').grid(row=0, column=1)
+        presets_bar = ttk.Frame(right, style='Card.TFrame')
+        presets_bar.pack(fill='x', pady=(5, 0))
+        ttk.Button(presets_bar, text='Save selection', command=self.save_preset, style='Soft.TButton').pack(side='left')
+        ttk.Button(presets_bar, text='Delete preset', command=self.delete_preset, style='Soft.TButton').pack(side='left', padx=5)
 
-        # Results card
-        result_shadow, result = self._card(main)
-        result_shadow.pack(fill="both", expand=True)
-
-        result_top = ttk.Frame(result, style="Card.TFrame")
-        result_top.pack(fill="x", pady=(0, 7))
-        self._accent_button(result_top, "Scan selected folders", self.scan_files).pack(side="left")
-        self._accent_button(result_top, "Copy MPR files", self.copy_files).pack(side="left", padx=8)
-        ttk.Checkbutton(
-            result_top,
-            text="Replace same-named files already in destination",
-            variable=self.overwrite_existing,
-            style="Warm.TCheckbutton",
-        ).pack(side="left", padx=(8, 4))
-        ttk.Label(result_top, textvariable=self.scan_summary, style="Muted.TLabel").pack(side="right")
-
-        ttk.Label(
-            result,
-            text="Replace affects only individual destination files with the same planned filename. Other files already in the destination folder are never removed.",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(0, 6))
-
-        table_frame = tk.Frame(result, bg=self.palette["border"], bd=0)
-        self._border_frames.append(table_frame)
-        table_frame.pack(fill="both", expand=True)
-        columns = ("name", "copy_as", "modified", "source")
-        self.files_table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse", style="Files.Treeview")
-        self.files_table.heading("name", text="Source filename")
-        self.files_table.heading("copy_as", text="Copied as")
-        self.files_table.heading("modified", text="Modified")
-        self.files_table.heading("source", text="Source folder")
-        self.files_table.column("name", width=255, anchor="w")
-        self.files_table.column("copy_as", width=290, anchor="w")
-        self.files_table.column("modified", width=140, anchor="center")
-        self.files_table.column("source", width=470, anchor="w")
+        result_card, result = self._card(self.workspace_panes)
+        self.workspace_panes.add(result_card, minsize=180, stretch='always')
+        top = ttk.Frame(result, style='Card.TFrame')
+        top.pack(fill='x', pady=(0, 7))
+        ttk.Label(top, text='03  /  REVIEW & COPY', style='Section.TLabel').pack(side='left')
+        ttk.Label(top, textvariable=self.scan_summary, style='Muted.TLabel').pack(side='right')
+        actions = ttk.Frame(result, style='Card.TFrame')
+        actions.pack(fill='x', pady=(0, 7))
+        self.scan_button = ttk.Button(actions, text='Scan selected folders', command=self.scan_files, style='Soft.TButton')
+        self.scan_button.pack(side='left')
+        self.copy_button = self._accent_button(actions, 'Copy MPR files', self.copy_files)
+        self.copy_button.pack(side='left', padx=8)
+        self.copy_button.state(['disabled'])
+        ttk.Checkbutton(actions, text='Replace existing files', variable=self.overwrite_existing,
+                        command=self._refresh_files_table, style='Warm.TCheckbutton').pack(side='left', padx=6)
+        ttk.Label(result, text='Sources stay untouched. Matching destination names are skipped unless replacement is enabled.',
+                  style='Muted.TLabel').pack(anchor='w', pady=(0, 6))
+        table_frame = ttk.Frame(result, style='Card.TFrame')
+        table_frame.pack(fill='both', expand=True)
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+        columns = ('name', 'copy_as', 'action', 'modified', 'source')
+        self.files_table = ttk.Treeview(table_frame, columns=columns, show='headings',
+                                        selectmode='browse', style='Files.Treeview', height=3)
+        for key, label, width in [('name', 'Source filename', 215), ('copy_as', 'Copied as', 235),
+                                   ('action', 'Planned action', 130), ('modified', 'Modified', 140),
+                                   ('source', 'Source folder', 390)]:
+            self.files_table.heading(key, text=label)
+            self.files_table.column(key, width=width, minwidth=70, stretch=False, anchor='w')
         self._apply_table_tag_colors()
-        sy = ttk.Scrollbar(table_frame, orient="vertical", command=self.files_table.yview)
-        self.files_table.configure(yscrollcommand=sy.set)
-        self.files_table.pack(side="left", fill="both", expand=True, padx=1, pady=1)
-        sy.pack(side="right", fill="y", padx=(0, 1), pady=1)
+        self._scrollable(self.files_table, table_frame)
+        footer = ttk.Frame(main, style='App.TFrame')
+        footer.pack(side='bottom', fill='x', pady=(8, 0), before=self.workspace_panes)
+        ttk.Label(footer, textvariable=self.status_text, style='Status.TLabel', anchor='w').pack(side='left', fill='x', expand=True)
+        self.progress = ttk.Progressbar(footer, mode='indeterminate', length=110)
 
-        ttk.Label(main, textvariable=self.status_text, style="Status.TLabel", anchor="w").pack(fill="x", pady=(8, 0))
+    def _scrollable(self, widget, parent):
+        vertical = ttk.Scrollbar(parent, orient='vertical', command=widget.yview)
+        horizontal = ttk.Scrollbar(parent, orient='horizontal', command=widget.xview)
+        widget.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        widget.grid(row=0, column=0, sticky='nsew')
+        vertical.grid(row=0, column=1, sticky='ns')
+        horizontal.grid(row=1, column=0, sticky='ew')
+
+    def _capture_layout(self):
+        layout = {'columns': {key: self.files_table.column(key, 'width') for key in self.files_table['columns']}}
+        if self.state() != 'withdrawn':
+            layout['width'] = self.winfo_width()
+            layout['height'] = self.winfo_height()
+            layout['maximized'] = self.state() == 'zoomed'
+        for key, pane, axis in [('vertical', self.workspace_panes, 1), ('horizontal', self.folder_panes, 0)]:
+            extent = pane.winfo_height() if axis else pane.winfo_width()
+            if extent > 1:
+                layout[key] = pane.sash_coord(0)[axis] / extent
+        return layout
+
+    def _restore_layout(self):
+        saved = self._saved_layout
+        try:
+            width = max(900, min(int(saved.get('width', 1240)), self.winfo_screenwidth()))
+            height = max(680, min(int(saved.get('height', 820)), self.winfo_screenheight() - 70))
+            self.geometry(f'{width}x{height}')
+            if saved.get('maximized') is True:
+                self.state('zoomed')
+            self.update_idletasks()
+            for key, pane, axis, default in [('vertical', self.workspace_panes, 1, .45), ('horizontal', self.folder_panes, 0, .62)]:
+                fraction = max(.2, min(.8, float(saved.get(key, default))))
+                extent = pane.winfo_height() if axis else pane.winfo_width()
+                pane.sash_place(0, 0 if axis else int(extent*fraction), int(extent*fraction) if axis else 0)
+            columns = saved.get('columns', {})
+            if isinstance(columns, dict):
+                for key in self.files_table['columns']:
+                    if key in columns:
+                        self.files_table.column(key, width=max(70, min(1500, int(columns[key]))))
+        except (ValueError, TypeError, tk.TclError, OverflowError):
+            pass
+
+    def reset_layout(self):
+        self._saved_layout = {}
+        self.state('normal')
+        for key, width in [('name', 215), ('copy_as', 235), ('action', 130), ('modified', 140), ('source', 390)]:
+            self.files_table.column(key, width=width)
+        self._restore_layout()
+
+    def set_focused_selection(self, selected):
+        path = self._focused_path()
+        if path and not self._busy:
+            set_selection_rule(self.selection_rules, path, selected)
+            self._selection_changed()
+
+    def _toggle_focused(self, event=None):
+        path = self._focused_path()
+        if path:
+            self.set_focused_selection(selection_state(path, self.selection_rules) != 'checked')
+        return 'break'
+
+    def _destination_changed(self):
+        self._save_last_folders()
+        self._refresh_files_table()
+
+    def _start_job(self, work, completed, label):
+        if self._busy:
+            return
+        self._busy = True
+        self.status_text.set(label)
+        self._disabled_widgets = []
+        def disable(parent):
+            for widget in parent.winfo_children():
+                if isinstance(widget, (ttk.Button, ttk.Entry, ttk.Combobox, ttk.Checkbutton)):
+                    self._disabled_widgets.append((widget, widget.state()))
+                    widget.state(['disabled'])
+                disable(widget)
+        disable(self)
+        self.progress.pack(side='right', padx=(8, 0))
+        self.progress.start(15)
+        def run():
+            try:
+                self._job_queue.put((True, work()))
+            except Exception as exc:
+                self._job_queue.put((False, exc))
+        threading.Thread(target=run, daemon=True).start()
+        self._job_completed = completed
+        self._poll_id = self.after(40, self._poll_job)
+
+    def _poll_job(self):
+        self._poll_id = None
+        try:
+            success, value = self._job_queue.get_nowait()
+        except queue.Empty:
+            self._poll_id = self.after(40, self._poll_job)
+            return
+        self._busy = False
+        self.progress.stop()
+        self.progress.pack_forget()
+        for widget, previous in self._disabled_widgets:
+            widget.state(['!disabled'])
+            widget.state(previous)
+        if success:
+            self._job_completed(value)
+        else:
+            self.status_text.set('Operation failed. See the error for details.')
+            messagebox.showerror(APP_NAME, str(value))
 
     def _accent_button(self, parent: tk.Misc, text: str, command) -> ttk.Button:
         return ttk.Button(parent, text=text, command=command, style="Accent.TButton")
@@ -343,35 +435,23 @@ class MPRCollectorApp(tk.Tk):
         if hasattr(self, "banner"):
             self.banner.configure(bg=self.palette["bg"])
             self._draw_gradient_banner()
+        self.workspace_panes.configure(bg=self.palette['bg'])
+        self.folder_panes.configure(bg=self.palette['bg'])
         self._apply_table_tag_colors()
         self._save_last_folders()
 
     def _draw_gradient_banner(self, _event=None) -> None:
         c = self.banner
-        c.delete("all")
-        width = max(c.winfo_width(), 2)
-        height = max(c.winfo_height(), 2)
-        start = self._hex_to_rgb(self.palette["gradient_start"])
-        middle = self._hex_to_rgb(self.palette["gradient_middle"])
-        end = self._hex_to_rgb(self.palette["gradient_end"])
-        steps = min(width, 240)
-        for i in range(steps):
-            t = i / max(steps - 1, 1)
-            if t < 0.62:
-                u = t / 0.62
-                rgb = tuple(round(start[j] + (middle[j] - start[j]) * u) for j in range(3))
-            else:
-                u = (t - 0.62) / 0.38
-                rgb = tuple(round(middle[j] + (end[j] - middle[j]) * u) for j in range(3))
-            color = "#%02x%02x%02x" % rgb
-            x0 = i * width / steps
-            x1 = (i + 1) * width / steps + 1
-            c.create_rectangle(x0, 0, x1, height, outline=color, fill=color)
-        c.create_text(22, 28, text="MPR Collector", anchor="w", fill=self.palette["gradient_text"], font=("Segoe UI Semibold", 18))
-        c.create_text(23, 53, text="Choose experiment branches across BIO machines • recursive to any depth", anchor="w", fill=self.palette["gradient_subtext"], font=("Segoe UI", 9))
-        c.create_line(0, height - 1, width, height - 1, fill=self.palette["border"])
+        p = self.palette
+        c.delete('all')
+        c.configure(bg=p['card'])
+        c.create_rectangle(18, 16, 52, 50, fill=p['accent'], outline='')
+        c.create_text(35, 33, text='M', fill='white', font=('Segoe UI Semibold', 17))
+        c.create_text(66, 24, anchor='w', text='MPR Collector', fill=p['text'], font=('Segoe UI Semibold', 19))
+        c.create_text(67, 47, anchor='w', text='Select experiments. Review filenames. Collect with confidence.', fill=p['muted'], font=('Segoe UI', 10))
+        c.create_text(max(650, c.winfo_width()-22), 32, anchor='e', text='LOCAL FILE UTILITY', fill=p['muted'], font=('Segoe UI Semibold', 9))
+        c.create_line(0, 67, c.winfo_width(), 67, fill=p['border'])
 
-    # ---------- persistent folders ----------
     def _restore_last_folders(self) -> None:
         settings = load_app_settings(self.settings_path)
         root = settings.get("root_folder", "")
@@ -392,27 +472,41 @@ class MPRCollectorApp(tk.Tk):
                 self.root_folder.get().strip(),
                 self.destination_folder.get().strip(),
                 self.color_scheme.get(),
+                remember_paths=self.remember_paths.get(),
+                layout=self._capture_layout(),
             )
         except Exception:
             pass
 
     def _on_close(self) -> None:
+        if self._busy:
+            messagebox.showinfo(APP_NAME, 'Please wait for the current scan or copy to finish before closing.')
+            return
         self._save_last_folders()
         self.destroy()
 
-    def _apply_root_entry(self) -> None:
+    def _apply_root_entry(self) -> bool:
+        if self._busy:
+            return False
         text = self.root_folder.get().strip()
         if not text:
-            return
+            if self._loaded_root is None and self.selection_rules:
+                return True  # Legacy presets can contain paths without a mother folder.
+            self._clear_scan()
+            return False
         p = Path(text).expanduser()
         if not p.is_dir():
+            self._clear_scan()
             messagebox.showwarning(APP_NAME, "That mother folder does not exist or cannot be opened.")
-            return
+            return False
+        if p.resolve() == self._loaded_root:
+            return True
         self.selection_rules.clear()
         self._load_tree(p.resolve())
         self._refresh_selection_summary()
         self._clear_scan()
         self._save_last_folders()
+        return True
 
     def choose_root(self) -> None:
         initial = self.root_folder.get().strip() or None
@@ -432,14 +526,16 @@ class MPRCollectorApp(tk.Tk):
         folder = filedialog.askdirectory(title="Choose destination folder", initialdir=initial)
         if folder:
             self.destination_folder.set(folder)
-            self._save_last_folders()
+            self._destination_changed()
 
     # ---------- lazy folder tree ----------
     def _load_tree(self, root: Path) -> None:
+        self._loaded_root = root.resolve()
         self.tree.delete(*self.tree.get_children())
         self.item_paths.clear()
-        for child in list_immediate_subfolders(root):
-            self._insert_folder_node("", child)
+        node = self._insert_folder_node('', root)
+        self._ensure_node_loaded(node)
+        self.tree.item(node, open=True)
 
     def _insert_folder_node(self, parent_id: str, folder: Path) -> str:
         node = self.tree.insert(parent_id, "end", text="")
@@ -491,6 +587,8 @@ class MPRCollectorApp(tk.Tk):
         return path
 
     def _on_tree_click(self, event) -> str:
+        if self._busy:
+            return 'break'
         node = self.tree.identify_row(event.y)
         if not node:
             return "break"
@@ -498,6 +596,7 @@ class MPRCollectorApp(tk.Tk):
         if not path or str(path) == "__placeholder__":
             return "break"
         element = self.tree.identify_element(event.x, event.y)
+        self.tree.focus_set()
         self.tree.focus(node)
         self.tree.selection_set(node)
 
@@ -519,6 +618,10 @@ class MPRCollectorApp(tk.Tk):
         return "break"
 
     def _on_tree_double_click(self, event) -> str:
+        if self._busy:
+            return 'break'
+        if 'indicator' in self.tree.identify_element(event.x, event.y):
+            return 'break'
         node = self.tree.identify_row(event.y)
         if not node:
             return "break"
@@ -544,6 +647,8 @@ class MPRCollectorApp(tk.Tk):
             self.tree.item(node, open=False)
 
     def clear_selection(self) -> None:
+        if self._busy:
+            return
         self.selection_rules.clear()
         self._selection_changed()
 
@@ -574,18 +679,27 @@ class MPRCollectorApp(tk.Tk):
         self.scanned_files = []
         self.copy_name_plan = {}
         self.scan_summary.set("No scan yet")
+        self.copy_button.state(["disabled"])
         self._refresh_files_table()
 
     def scan_files(self) -> None:
-        if not any(self.selection_rules.values()):
-            messagebox.showwarning(APP_NAME, "Select at least one folder branch first.")
+        if self._busy:
             return
-        self.status_text.set("Scanning selected branches recursively to the deepest subfolders…")
-        self.update_idletasks()
-        self.scanned_files = collect_mpr_files_by_rules(self.selection_rules)
-        self.copy_name_plan = plan_flat_copy_names(self.scanned_files)
-        self._refresh_files_table()
+        if not self._apply_root_entry():
+            return
+        if not any(self.selection_rules.values()):
+            messagebox.showwarning(APP_NAME, 'Select at least one folder branch first.')
+            return
+        rules = dict(self.selection_rules)
+        self._clear_scan()
+        self._start_job(lambda: collect_mpr_files_by_rules(rules), self._finish_scan, 'Scanning selected branches…')
 
+    def _finish_scan(self, files):
+        self.scanned_files = files
+        self.copy_name_plan = plan_flat_copy_names(files)
+        self._refresh_files_table()
+        if files:
+            self.copy_button.state(['!disabled'])
         conflicts = analyze_flat_name_conflicts(self.scanned_files)
         renamed = sum(1 for p in self.scanned_files if self.copy_name_plan.get(p.resolve(), p.name).casefold() != p.name.casefold())
         self.scan_summary.set(f"{len(self.scanned_files)} MPR found • {renamed} unique copied name(s)")
@@ -606,9 +720,18 @@ class MPRCollectorApp(tk.Tk):
             copy_as = self.copy_name_plan.get(path.resolve(), path.name)
             source = relative_display_path(path.parent, root) if root else str(path.parent)
             tag = "renamed" if copy_as.casefold() != path.name.casefold() else ("even" if idx % 2 == 0 else "odd")
-            self.files_table.insert("", "end", values=(path.name, copy_as, modified, source), tags=(tag,))
+            destination = self.destination_folder.get().strip()
+            exists = bool(destination) and (Path(destination).expanduser() / copy_as).exists()
+            action = ('Replace' if self.overwrite_existing.get() else 'Skip existing') if exists else 'Copy'
+            if not destination:
+                action = 'Set destination'
+            self.files_table.insert('', 'end', values=(path.name, copy_as, action, modified, source), tags=(tag,))
 
     def copy_files(self) -> None:
+        if self._busy:
+            return
+        if not self._apply_root_entry():
+            return
         if not self.scanned_files:
             messagebox.showwarning(APP_NAME, "Scan the selected folders first.")
             return
@@ -647,16 +770,14 @@ class MPRCollectorApp(tk.Tk):
         ):
             return
 
-        result = copy_files_flat(
-            self.scanned_files,
-            destination,
-            overwrite=replacing,
-            name_plan=self.copy_name_plan,
-        )
-        replaced_text = f"Replaced same-named destination files: {existing_count}\n" if replacing else ""
+        files = list(self.scanned_files)
+        plan = dict(self.copy_name_plan)
+        self._start_job(lambda: copy_files_flat(files, destination, overwrite=replacing, name_plan=plan),
+                        self._finish_copy, f'Copying {len(files)} MPR files…')
+
+    def _finish_copy(self, result):
         text = (
             f"Copied: {result.copied}\n"
-            f"{replaced_text}"
             f"Skipped because already present: {result.skipped_existing}\n"
             f"Failed: {result.failed}\n\n"
             "No unrelated file in the destination folder was removed.\n"
@@ -664,7 +785,8 @@ class MPRCollectorApp(tk.Tk):
         )
         if result.failures:
             text += "\n\nFirst errors:\n" + "\n".join(result.failures[:5])
-        messagebox.showinfo(APP_NAME, text)
+        self._refresh_files_table()
+        (messagebox.showwarning if result.failed else messagebox.showinfo)(APP_NAME, text)
         self.status_text.set(f"Finished — copied {result.copied}, skipped {result.skipped_existing}, failed {result.failed}.")
 
     # ---------- presets ----------
@@ -679,7 +801,7 @@ class MPRCollectorApp(tk.Tk):
         return {}
 
     def _write_presets(self, presets: dict[str, object]) -> None:
-        self.presets_path.write_text(json.dumps(presets, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_json_atomic(self.presets_path, presets)
 
     def _refresh_presets(self) -> None:
         names = sorted(self._read_presets().keys(), key=str.lower)
