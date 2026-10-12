@@ -1,3 +1,4 @@
+import gc
 import json
 import tempfile
 import time
@@ -10,6 +11,9 @@ import mpr_collector as ui
 
 class InterfaceTests(unittest.TestCase):
     def setUp(self):
+        # Older Tkinter releases may finalize abandoned images/variables on a
+        # worker thread unless previous test windows are collected here.
+        gc.collect()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.cfg = Path(self.temp.name)
@@ -19,7 +23,14 @@ class InterfaceTests(unittest.TestCase):
         self.app = ui.MPRCollectorApp()
         self.app.update()
         self.app.withdraw()
-        self.addCleanup(self.app.destroy)
+        self.addCleanup(self._destroy_app)
+
+    def _destroy_app(self):
+        app = self.app
+        app.destroy()
+        self.app = None
+        del app
+        gc.collect()
 
     def test_mother_folder_itself_can_be_selected(self):
         root = self.cfg / 'experiment'

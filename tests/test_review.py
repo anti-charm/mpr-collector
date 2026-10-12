@@ -1,3 +1,4 @@
+import gc
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,13 +19,20 @@ class ReviewTests(unittest.TestCase):
         self.addCleanup(self.config.stop)
         self.app = ui.MPRCollectorApp()
         self.app.update()
-        self.addCleanup(self.app.destroy)
+        self.addCleanup(self._destroy_app)
         self.root = self.base / 'experiments'
         (self.root / 'child').mkdir(parents=True)
         self.app.root_folder.set(str(self.root))
         self.app._apply_root_entry()
         self.node = self.app.tree.get_children()[0]
         self.app.update()
+
+    def _destroy_app(self):
+        app = self.app
+        app.destroy()
+        self.app = None
+        del app
+        gc.collect()
 
     def event(self, node, element):
         self.app.tree.see(node)
