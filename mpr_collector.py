@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -25,7 +26,7 @@ from mpr_collector_core import (
 )
 
 from mpr_collector_themes import COLOR_SCHEMES, DEFAULT_COLOR_SCHEME
-from mpr_collector_review import COLUMNS, ReviewTable
+from mpr_collector_review import COLUMNS, ReviewTable, format_file_size
 
 APP_NAME = "MPR Collector"
 
@@ -42,6 +43,36 @@ def app_config_dir() -> Path:
     return local_program_data_dir(app_program_dir())
 
 
+def _preset_folder_index(root: Path) -> tuple[list[Path], list[str]]:
+    """Index folders once when an exact preset-relative path has moved."""
+    folders: set[Path] = set()
+    errors: list[str] = []
+    for current, names, _files in os.walk(root, onerror=lambda error: errors.append(str(error))):
+        for name in names:
+            folder = (Path(current) / name).resolve()
+            if folder.is_relative_to(root) and folder.is_dir():
+                folders.add(folder)
+    return sorted(folders, key=lambda folder: str(folder).casefold()), errors
+
+
+def _match_preset_folder(relative: Path, root: Path, folders: list[Path]) -> tuple[Path | None, str]:
+    """Match a moved folder by its longest unique trailing folder sequence."""
+    exact = (root / relative).resolve()
+    if exact.is_relative_to(root) and exact.is_dir():
+        return exact, ''
+    saved_parts = tuple(part.casefold() for part in relative.parts)
+    for length in range(len(saved_parts), 0, -1):
+        suffix = saved_parts[-length:]
+        matches = [folder for folder in folders
+                   if tuple(part.casefold() for part in folder.relative_to(root).parts[-length:]) == suffix
+                   and len(folder.relative_to(root).parts) >= length]
+        if len(matches) == 1:
+            return matches[0], ''
+        if len(matches) > 1:
+            return None, 'ambiguous'
+    return None, 'missing'
+
+
 class MPRCollectorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -56,6 +87,7 @@ class MPRCollectorApp(tk.Tk):
         self.remember_paths = tk.BooleanVar(value=saved_settings.get('remember_paths', True))
         self._saved_layout = saved_settings.get('layout', {})
         self._loaded_root = None
+        self._root_explicitly_chosen = False
         self._busy = False
         self._job_queue = queue.Queue()
         self._poll_id = None
@@ -69,7 +101,7 @@ class MPRCollectorApp(tk.Tk):
 
         self.root_folder = tk.StringVar()
         self.destination_folder = tk.StringVar()
-        self.overwrite_existing = tk.BooleanVar(value=False)
+        self.overwrite_existing = tk.BooleanVar(value=True)
         self.status_text = tk.StringVar(value="Choose folders, then check the experiment branches you want.")
         self.scan_summary = tk.StringVar(value="No scan yet")
         self.preset_name = tk.StringVar()
@@ -558,8 +590,7 @@ class MPRCollectorApp(tk.Tk):
         c.configure(bg=p['accent_pressed'])
         c.create_rectangle(18, 10, 52, 44, fill='#ffffff', outline='')
         c.create_text(35, 27, text='M', fill=p['accent_pressed'], font=('Segoe UI Semibold', 17))
-        c.create_text(66, 19, anchor='w', text='MPR Collector', fill='#ffffff', font=('Segoe UI Semibold', 19))
-        c.create_text(67, 42, anchor='w', text='Select experiments. Review filenames. Collect with confidence.', fill='#e5ecf5', font=('Segoe UI', 10))
+        c.create_text(66, 27, anchor='w', text='MPR Collector', fill='#ffffff', font=('Segoe UI Semibold', 19))
         c.create_text(max(650, c.winfo_width()-22), 27, anchor='e', text='LOCAL FILE UTILITY', fill='#e5ecf5', font=('Segoe UI Semibold', 9))
         c.create_line(0, 55, c.winfo_width(), 55, fill=p['border'])
 
@@ -612,6 +643,7 @@ class MPRCollectorApp(tk.Tk):
             return False
         if p.resolve() == self._loaded_root:
             return True
+        self._root_explicitly_chosen = True
         self.selection_rules.clear()
         self._load_tree(p.resolve())
         self._refresh_selection_summary()
@@ -625,6 +657,7 @@ class MPRCollectorApp(tk.Tk):
         if not folder:
             return
         self.root_folder.set(folder)
+        self._root_explicitly_chosen = True
         self.selection_rules.clear()
         self._load_tree(Path(folder).resolve())
         self._refresh_selection_summary()
@@ -818,24 +851,29 @@ class MPRCollectorApp(tk.Tk):
         )
 
     def _refresh_files_table(self) -> None:
-        root_text = self.root_folder.get().strip()
-        root = Path(root_text) if root_text else None
         destination = self.destination_folder.get().strip()
         rows = []
         for path in self.scanned_files:
             try:
-                modified = datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')
+                stat = path.stat()
+                modified = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+                size_bytes = stat.st_size
+                size = format_file_size(size_bytes)
             except OSError:
                 modified = ''
+                size_bytes = None
+                size = ''
             copy_as = self.copy_name_plan.get(path.resolve(), path.name)
-            source = relative_display_path(path.parent, root) if root else str(path.parent)
+            folder_parts = [part for part in path.parent.parts if part != path.parent.anchor]
+            source = '\\'.join(folder_parts[-2:]) or str(path.parent)
             exists = bool(destination) and (Path(destination).expanduser() / copy_as).exists()
             action = ('Replace' if self.overwrite_existing.get() else 'Skip existing') if exists else 'Copy'
             if not destination:
                 action = 'Set destination'
             naming = 'Name adjusted' if copy_as.casefold() != path.name.casefold() else 'Unchanged'
             rows.append(dict(name=path.name, copy_as=copy_as, action=action, naming=naming,
-                             modified=modified, source=source, _path=path))
+                             modified=modified, size=size, source=source,
+                             _size_bytes=size_bytes, _path=path))
         self._review_rows = rows
         self.review_view.set_rows(rows)
         if self._review_is_open():
@@ -932,12 +970,24 @@ class MPRCollectorApp(tk.Tk):
         if not name or not name.strip():
             return
         name = name.strip()
+        root_text = self.root_folder.get().strip()
+        root = self._loaded_root or (Path(root_text).expanduser().resolve() if root_text else None)
+        ordered = sorted(self.selection_rules.items(), key=lambda kv: (len(kv[0].parts), str(kv[0]).casefold()))
+        try:
+            relative_paths = [path.resolve().relative_to(root).as_posix() for path, _selected in ordered]
+            path_format = 'relative'
+        except (ValueError, TypeError):
+            # Keep the old absolute format for unusual legacy selections without
+            # a mother folder or with rules outside it.
+            relative_paths = [str(path) for path, _selected in ordered]
+            path_format = 'absolute'
         presets = self._read_presets()
         presets[name] = {
-            "root": self.root_folder.get().strip(),
+            "root": str(root) if root else root_text,
+            "path_format": path_format,
             "rules": [
-                {"path": str(path), "selected": bool(selected)}
-                for path, selected in sorted(self.selection_rules.items(), key=lambda kv: str(kv[0]).lower())
+                {"path": path, "selected": bool(selected)}
+                for path, (_folder, selected) in zip(relative_paths, ordered)
             ],
         }
         self._write_presets(presets)
@@ -950,40 +1000,183 @@ class MPRCollectorApp(tk.Tk):
         if not name or name not in presets:
             return
         raw = presets[name]
-        new_rules: dict[Path, bool] = {}
-        missing: list[str] = []
+        if (isinstance(raw, list) and not raw) or (isinstance(raw, dict) and raw.get('rules') == []):
+            messagebox.showwarning(APP_NAME, "The preset has no saved folders. The current selection was kept.")
+            return
+        current_text = self.root_folder.get().strip()
+        current_root = Path(current_text).expanduser().resolve() if current_text and Path(current_text).expanduser().is_dir() else None
+        current_is_explicit = current_root is not None and (
+            self._root_explicitly_chosen or current_root != self._loaded_root
+        )
 
-        # New format.
+        def choose_target(saved_root: Path | None) -> tuple[Path | None, bool]:
+            if current_is_explicit:
+                return current_root, True
+            if saved_root is not None and saved_root.is_dir():
+                return saved_root.resolve(), False
+            if current_root is not None:
+                return current_root, False
+            chosen = filedialog.askdirectory(title=f"Choose mother folder for preset '{name}'")
+            if not chosen:
+                return None, False
+            folder = Path(chosen).expanduser().resolve()
+            if not folder.is_dir():
+                messagebox.showwarning(APP_NAME, "The chosen mother folder cannot be opened.")
+                return None, False
+            return folder, True
+
         if isinstance(raw, dict) and isinstance(raw.get("rules"), list):
             preset_root = str(raw.get("root", "")).strip()
-            if preset_root and Path(preset_root).is_dir():
-                self.root_folder.set(preset_root)
-                self._load_tree(Path(preset_root).resolve())
+            saved_root = Path(preset_root).expanduser() if preset_root else None
+            target_root: Path | None = None
+            target_explicit = False
+            if saved_root or raw.get('path_format') == 'relative' or current_is_explicit:
+                target_root, target_explicit = choose_target(saved_root)
+                if target_root is None:
+                    return
+
+            entries: list[tuple[Path, bool, str]] = []
+            mapped: list[tuple[Path, Path, bool]] = []
+            problems: list[str] = []
             for item in raw["rules"]:
                 if not isinstance(item, dict):
+                    problems.append('Invalid preset rule')
                     continue
-                path_text = str(item.get("path", ""))
-                p = Path(path_text)
-                if p.is_dir():
-                    set_selection_rule(new_rules, p.resolve(), bool(item.get("selected", True)))
+                path_text = item.get('path')
+                if not isinstance(path_text, str) or not path_text.strip():
+                    problems.append('Invalid empty preset folder')
+                    continue
+                path_text = path_text.strip()
+                selected = item.get('selected', True)
+                if not isinstance(selected, bool):
+                    problems.append(f"{path_text}: invalid selected/excluded state")
+                    continue
+                saved_path = Path(path_text) if raw.get('path_format') == 'relative' else Path(path_text).expanduser()
+                if target_root is None:
+                    # Older dictionary presets without a mother folder can only
+                    # be used where their original absolute paths still exist.
+                    if saved_path.is_dir():
+                        mapped.append((saved_path, saved_path.resolve(), selected))
+                    else:
+                        problems.append(f"{path_text}: missing")
+                    continue
+
+                if raw.get('path_format') == 'relative':
+                    relative = saved_path
+                    if relative.drive or relative.is_absolute() or '..' in relative.parts:
+                        problems.append(f"{path_text}: invalid relative folder")
+                        continue
                 else:
-                    missing.append(path_text)
-        # Backward compatibility with old presets that were just lists of included folders.
+                    try:
+                        relative = saved_path.relative_to(saved_root)
+                    except (ValueError, TypeError):
+                        if saved_root is not None and saved_root.is_dir() and target_root == saved_root.resolve() and saved_path.is_dir():
+                            mapped.append((saved_path, saved_path.resolve(), selected))
+                            continue
+                        parts = saved_path.parts[1:] if saved_path.anchor else saved_path.parts
+                        if not parts:
+                            problems.append(f"{path_text}: invalid folder")
+                            continue
+                        relative = Path(*parts)
+                entries.append((relative, selected, path_text))
+
+            folders: list[Path] | None = None
+            for relative, selected, path_text in sorted(entries, key=lambda entry: (len(entry[0].parts), str(entry[0]).casefold())):
+                parent = max(
+                    (entry for entry in mapped if relative != entry[0] and relative.is_relative_to(entry[0])),
+                    key=lambda entry: len(entry[0].parts), default=None,
+                )
+                base = parent[1] if parent else target_root
+                suffix = relative.relative_to(parent[0]) if parent else relative
+                exact = (base / suffix).resolve()
+                if not (exact.is_relative_to(base) and exact.is_dir()) and folders is None:
+                    folders, errors = _preset_folder_index(target_root)
+                    problems.extend(f"Cannot search mother folder: {error}" for error in errors)
+                candidates = [folder for folder in folders or [] if folder.is_relative_to(base)]
+                folder, reason = _match_preset_folder(suffix, base, candidates)
+                if folder is None:
+                    problems.append(f"{path_text}: {reason}")
+                else:
+                    mapped.append((relative, folder, selected))
+
+            # Distinct saved folders must not collapse onto one folder, and a
+            # child exclusion must still be inside its matched parent branch.
+            for index, (relative, folder, _selected) in enumerate(mapped):
+                for earlier_relative, earlier_folder, _earlier_selected in mapped[:index]:
+                    if relative == earlier_relative:
+                        problems.append(f"{relative}: duplicate preset rule")
+                    if relative != earlier_relative and folder == earlier_folder:
+                        problems.append(f"{relative}: ambiguous match")
+                    if relative != earlier_relative and relative.is_relative_to(earlier_relative):
+                        if not folder.is_relative_to(earlier_folder):
+                            problems.append(f"{relative}: moved outside its selected parent")
+                    if relative != earlier_relative and earlier_relative.is_relative_to(relative):
+                        if not earlier_folder.is_relative_to(folder):
+                            problems.append(f"{earlier_relative}: moved outside its selected parent")
+            if problems:
+                messagebox.showwarning(
+                    APP_NAME,
+                    "Preset folders could not be matched safely. The current selection was kept:\n\n"
+                    + "\n".join(problems[:10]),
+                )
+                return
+
+            new_rules: dict[Path, bool] = {}
+            for _relative, folder, selected in sorted(mapped, key=lambda entry: (len(entry[1].parts), str(entry[1]).casefold())):
+                set_selection_rule(new_rules, folder, selected)
+            if target_root is not None:
+                self.root_folder.set(str(target_root))
+                self._load_tree(target_root)
+                self._root_explicitly_chosen = target_explicit
         elif isinstance(raw, list):
-            for path_text in raw:
-                p = Path(str(path_text))
-                if p.is_dir():
-                    set_selection_rule(new_rules, p.resolve(), True)
-                else:
-                    missing.append(str(path_text))
+            # Backward compatibility with old presets that were just lists of
+            # absolute included folders. Match by unique path suffix if moved.
+            if any(not isinstance(path, str) or not path.strip() for path in raw):
+                messagebox.showwarning(APP_NAME, "Preset contains an invalid empty folder.")
+                return
+            old_paths = [Path(path).expanduser() for path in raw]
+            new_rules = {}
+            if all(path.is_dir() for path in old_paths) and not current_is_explicit:
+                for path in old_paths:
+                    set_selection_rule(new_rules, path.resolve(), True)
+            else:
+                target_root, target_explicit = choose_target(None)
+                if target_root is None:
+                    return
+                folders, errors = _preset_folder_index(target_root)
+                problems = [f"Cannot search mother folder: {error}" for error in errors]
+                matched: dict[Path, Path] = {}
+                for path in old_paths:
+                    parts = path.parts[1:] if path.anchor else path.parts
+                    if not parts:
+                        problems.append(f"{path}: invalid folder")
+                        continue
+                    folder, reason = _match_preset_folder(Path(*parts), target_root, folders)
+                    if folder is None:
+                        problems.append(f"{path}: {reason}")
+                    elif folder in matched and matched[folder] != path:
+                        problems.append(f"{path}: ambiguous match")
+                    else:
+                        matched[folder] = path
+                        set_selection_rule(new_rules, folder, True)
+                if problems:
+                    messagebox.showwarning(
+                        APP_NAME,
+                        "Preset folders could not be matched safely. The current selection was kept:\n\n"
+                        + "\n".join(problems[:10]),
+                    )
+                    return
+                self.root_folder.set(str(target_root))
+                self._load_tree(target_root)
+                self._root_explicitly_chosen = target_explicit
+        else:
+            return
 
         self.selection_rules = new_rules
         self._refresh_loaded_tree_states()
         self._refresh_selection_summary()
         self._clear_scan()
         self._save_last_folders()
-        if missing:
-            messagebox.showwarning(APP_NAME, "Some preset folders no longer exist:\n\n" + "\n".join(missing[:10]))
 
     def delete_preset(self) -> None:
         name = self.preset_name.get().strip()

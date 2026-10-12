@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Saved presets use folder rules relative to the mother folder. An explicitly chosen current mother folder takes precedence over the saved root, even if that root exists; an automatically restored folder does not. The loader tries the exact relative path, then a unique trailing-folder match. Missing or ambiguous matches warn without changing the current selection.
+- Older presets with a saved root can be rebased. The oldest list-only presets can also rebase under a current mother folder by unique trailing-folder matching when their old absolute paths are unavailable.
+- Added a clickable Size column after Modified, with numeric sorting and readable decimal file-size units.
+- Shortened Source folder entries to the final two folder names; full paths remain available in file details.
+- Enabled Replace existing files by default while keeping its checkbox and copy confirmation.
+- Removed the tagline beneath the app title.
+
 ## v1.0.0 — 2026-09-12
 
 ### Appearance and review update

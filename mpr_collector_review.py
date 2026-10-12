@@ -8,8 +8,22 @@ from tkinter import font as tkfont, ttk
 COLUMNS = (
     ('name', 'Source filename', 215), ('copy_as', 'Copied as', 235),
     ('action', 'Planned action', 130), ('naming', 'Name change', 140),
-    ('modified', 'Modified', 145), ('source', 'Source folder', 390),
+    ('modified', 'Modified', 145), ('size', 'Size', 100),
+    ('source', 'Source folder', 390),
 )
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Display decimal file sizes, with GB for compact large-MB values."""
+    if size_bytes >= 500_000_000:
+        value, unit = size_bytes / 1_000_000_000, 'GB'
+    elif size_bytes >= 1_000_000:
+        value, unit = size_bytes / 1_000_000, 'MB'
+    elif size_bytes >= 1_000:
+        value, unit = size_bytes / 1_000, 'KB'
+    else:
+        return f'{size_bytes} B'
+    return f"{value:.2f}".rstrip('0').rstrip('.') + f' {unit}'
 
 
 class ReviewTable(ttk.Frame):
@@ -85,7 +99,13 @@ class ReviewTable(ttk.Frame):
         query = self.search.get().strip().casefold()
         rows = [row for row in self.rows if not query or any(query in str(row.get(c[0], '')).casefold() for c in COLUMNS)]
         if self.sort_column:
-            rows.sort(key=lambda row: str(row.get(self.sort_column, '')).casefold(), reverse=self.descending)
+            if self.sort_column == 'size':
+                def size_key(row):
+                    size = row.get('_size_bytes')
+                    return (size is None, 0 if size is None else -size if self.descending else size)
+                rows.sort(key=size_key)
+            else:
+                rows.sort(key=lambda row: str(row.get(self.sort_column, '')).casefold(), reverse=self.descending)
         self.table.delete(*self.table.get_children())
         self._visible = {}
         for index, row in enumerate(rows):

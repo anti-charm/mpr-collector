@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import mpr_collector as ui
+import mpr_collector_review as review
 
 
 class ReviewTests(unittest.TestCase):
@@ -108,3 +109,34 @@ class ReviewTests(unittest.TestCase):
         self.app.files_table.column('naming', width=500)
         self.app.reset_layout()
         self.assertEqual(self.app.files_table.column('naming', 'width'), 140)
+
+    def test_file_size_uses_readable_decimal_units(self):
+        self.assertEqual(review.format_file_size(800_000_000), '0.8 GB')
+        self.assertEqual(review.format_file_size(12_500_000), '12.5 MB')
+        self.assertEqual(review.format_file_size(0), '0 B')
+
+    def test_size_heading_sorts_by_bytes_across_display_units(self):
+        view = self.app.review_view
+        view.set_rows([
+            {'name': 'big.mpr', 'size': '0.8 GB', '_size_bytes': 800_000_000},
+            {'name': 'medium.mpr', 'size': '12.5 MB', '_size_bytes': 12_500_000},
+            {'name': 'small.mpr', 'size': '2 MB', '_size_bytes': 2_000_000},
+            {'name': 'missing.mpr', 'size': '', '_size_bytes': None},
+        ])
+        view.sort_by('size')
+        self.assertEqual([view.table.set(i, 'name') for i in view.table.get_children()],
+                         ['small.mpr', 'medium.mpr', 'big.mpr', 'missing.mpr'])
+        view.sort_by('size')
+        self.assertEqual([view.table.set(i, 'name') for i in view.table.get_children()],
+                         ['big.mpr', 'medium.mpr', 'small.mpr', 'missing.mpr'])
+
+    def test_source_folder_shows_only_last_two_names(self):
+        folder = self.root / 'series' / 'cell'
+        folder.mkdir(parents=True)
+        source = folder / 'sample.mpr'
+        source.write_bytes(b'sample')
+        self.app._finish_scan([source.resolve()])
+        row = self.app.files_table.get_children()[0]
+        self.assertEqual(self.app.files_table.set(row, 'source'), 'series\\cell')
+        self.assertEqual(self.app.files_table.set(row, 'size'), '6 B')
+        self.assertEqual(self.app.review_view._visible[row]['_path'], source.resolve())

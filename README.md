@@ -30,14 +30,16 @@ Scans and copies run in the background with an activity indicator. Selection and
 ## Review in detail
 
 - **Open review window** opens a separate resizable window that can be maximized or left open while using the main app. Closing it leaves the main view and any active copy operation intact.
-- Search and click column headings to sort in the separate window. Its filtering, sorting, and column widths do not change the main table or the scan selection. **Copy all scanned files** always uses the entire scan, even when the window is filtered, and asks for confirmation.
+- Click column headings to sort in either table. The **Size** column, immediately after **Modified**, sorts by actual file size rather than the displayed text. Sizes use readable decimal units (1 GB = 1000 MB), such as **0.8 GB** or **12.5 MB**. Search is available in the separate window; its filtering, sorting, and column widths do not change the main table or the scan selection. **Copy all scanned files** always uses the entire scan, even when the window is filtered, and asks for confirmation.
 - Double-click a column divider to fit the longest displayed value. Width is limited to 520 pixels or half the table width, whichever is smaller, so a long path cannot take over the table. Drag the divider manually for a different width.
-- Double-click a row or press Enter for full source and destination paths. File details show a snapshot taken when opened.
+- **Source folder** shows only the final two folder names. Double-click a row or press Enter for full source and destination paths. File details show a snapshot taken when opened.
 - **Name adjusted** means the destination name was made unique (for example, a continuation suffix or duplicate filename). It is not an error. The **Name change** column explains this explicitly; alternating row shades only aid reading.
 
 ## Presets
 
-**Save selection** stores the mother folder and inclusion/exclusion rules. **Load** restores them. **Delete preset** removes the selected preset after confirmation. Older presets containing lists of included folders still load. Missing preset folders are reported.
+**Save selection** stores the mother folder and inclusion/exclusion rules relative to it. To use a preset on another computer, copy `MPR_Collector_Data/presets.json` to that installation. Before clicking **Load**, you can explicitly choose the appropriate **Mother folder** on the current computer. That choice takes precedence over the preset's saved root even when the saved root still exists. A mother folder restored automatically at startup does not override an available saved root. For each rule, the loader tries its exact relative path under the selected root, then searches beneath that root for a unique match to its trailing folder names. If any rule is missing or matches more than one folder, it warns you and leaves your current selection unchanged. **Delete preset** removes the selected preset after confirmation.
+
+Older presets with absolute folder rules and a saved root can also use this matching process. The oldest presets contain only a list of absolute paths, without a saved root. They still load from those paths when available; if the old paths are unavailable, choose a current **Mother folder** and **Load** can rebase them by unique trailing-folder matches. Missing or ambiguous matches leave the current selection unchanged. A list-only preset that selected just the old mother folder cannot be identified safely when that folder is renamed; recreate that preset once on the new computer to save it in the portable format.
 
 ## Duplicate names and continuations
 
@@ -55,7 +57,7 @@ Names are deterministic for the same selection. Changing the selection can chang
 
 ## Copy safety
 
-- Existing destination names are **skipped by default**. Enable **Replace existing files** only to replace those individual files. Unrelated destination files remain in place.
+- **Replace existing files** is checked by default. It replaces only destination files with names in the planned copy; unrelated destination files remain in place. Uncheck it to skip existing names. Review the planned actions and confirm the copy summary before copying.
 - Each file is staged beside the destination before publication. An ordinary copy failure preserves the previous destination file. Completed files from the same batch remain copied; this is not an all-or-nothing batch transaction.
 - Targets that are selected source paths or symbolic links are refused. Invalid names and duplicate targets in a custom plan are rejected before copying.
 - Inaccessible selected folders produce a scan error instead of a misleading complete result.
@@ -66,7 +68,7 @@ Names are deterministic for the same selection. Changing the selection can chang
 Settings and presets are plain-text JSON beside the program in `MPR_Collector_Data/`.
 
 - Uncheck **Remember folder paths on this computer** to clear remembered source/destination paths from settings. Appearance and layout still save; current session paths remain available.
-- **Saved presets still contain folder paths**, independently of the checkbox. Share them only if those paths are appropriate to disclose.
+- **Saved presets still contain the original mother-folder path and relative folder names**, independently of the checkbox. Older presets may contain absolute paths for every rule. Share them only if those paths are appropriate to disclose.
 - Share a clean repository download or distribution ZIP, rather than zipping your working installation. Leave out settings, presets, and experiment data. Check screenshots for private paths.
 - OneDrive or another service may sync files if you keep the program or destination in a synced folder. MPR Collector itself makes no network requests.
 - Generated filenames can contain experiment-folder names. Check names before sharing collected data.
