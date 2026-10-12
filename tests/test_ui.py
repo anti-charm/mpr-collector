@@ -158,7 +158,7 @@ class InterfaceTests(unittest.TestCase):
             (new_root / 'batch' / 'skip').resolve(): False,
             (new_root / 'batch' / 'skip' / 'include_again').resolve(): True,
         })
-        self.assertEqual(self.app.root_folder.get(), str(new_root))
+        self.assertEqual(Path(self.app.root_folder.get()).resolve(), new_root.resolve())
 
     def test_new_preset_remains_usable_after_moving_mother_folder(self):
         old_root = self.cfg / 'original'
@@ -362,7 +362,7 @@ class InterfaceTests(unittest.TestCase):
         }}), encoding='utf-8')
         self.app.preset_name.set('shared')
         self.app.load_preset()
-        self.assertEqual(self.app.root_folder.get(), str(current_root))
+        self.assertEqual(Path(self.app.root_folder.get()).resolve(), current_root.resolve())
         self.assertEqual(self.app.selection_rules, {(current_root / 'batch').resolve(): True})
 
     def test_empty_preset_cannot_clear_current_selection(self):
